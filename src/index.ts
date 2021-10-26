@@ -7,7 +7,7 @@ declare module 'express-session' {
 	}
 }
 import session from 'express-session';
-import redis from 'redis';
+import Redis from 'ioredis';
 import connectRedis from 'connect-redis';
 import { Client } from 'pg';
 import argon2 from 'argon2';
@@ -18,29 +18,28 @@ import sgMail from '@sendgrid/mail';
 sgMail.setApiKey(process.env.SENDGRID_API || '');
 import { msg_reset, msg_signup } from './util/email';
 import { v4 } from 'uuid';
-
+const redis = new Redis({
+	host: process.env.REDIS_HOST,
+	port: 12894,
+	password: process.env.REDIS_PASS,
+});
 const app = express();
 const PORT = process.env.PORT || 3000;
 // enable this if you run behind a proxy (e.g. nginx)
 app.set('trust proxy', 1);
 const RedisStore = connectRedis(session);
 //Configure redis client
-const redisClient = redis.createClient({
-	host: process.env.REDIS_HOST,
-	port: 12894,
-	password: process.env.REDIS_PASS,
-});
 
-redisClient.on('error', function (err) {
+redis.on('error', function (err) {
 	console.log('Could not establish a connection with redis. ' + err);
 });
-redisClient.on('connect', function (err) {
+redis.on('connect', function (err) {
 	console.log('Connected to redis successfully');
 });
 //Configure session middleware
 app.use(
 	session({
-		store: new RedisStore({ client: redisClient }),
+		store: new RedisStore({ client: redis }),
 		secret: process.env.SESSION_SECRET || 'simple_secret',
 		resave: false,
 		saveUninitialized: false,
@@ -72,14 +71,16 @@ app.get('/', (req, res) => {
 
 app.post('/login', async (req, res) => {
 	try {
+		const username = req.body.username;
 		const query = 'SELECT * FROM user WHERE username = $1';
-		const values = [req.body.username];
+		const values = [username];
 		const user_rows = await client.query(query, values);
 		const user = user_rows.rows[0];
 		console.log(user);
 		if (await argon2.verify(user.password, req.body.password)) {
 			// password match
-			req.session.username = req.body.username;
+			req.sessionID = 'sess:' + username + ':' + v4();
+			req.session.username = username;
 			res.status(201).json({
 				status: 'success',
 				message: 'signup success',
@@ -140,20 +141,15 @@ app.get('/resetpass', async (req, res) => {
 		const values = [req.body.email];
 		const token = v4();
 		const user_row = await client.query(query, values);
-		const hash = await argon2.hash(token);
-		await redisClient.set(
-			hash,
-			user_row.rows[0].username,
-			'ex',
-			1000 * 60 * 10
-		);
+		const hash = await argon2.hash(token); // store hashed token in db
+		await redis.set(hash, user_row.rows[0].username, 'ex', 1000 * 60 * 10);
 		msg_reset.text = `open this link in browser:${
 			process.env.DOMAIN + '/verifypass?token=' + token
 		}`;
 		msg_reset.text = `<a href='${
 			process.env.DOMAIN + '/verifypass?token=' + token
 		}'>token</strong>`;
-		sgMail.send(msg_reset);
+		sgMail.send(msg_reset); // send email with token to user
 	} catch (err) {
 		console.log(err);
 	} finally {
@@ -165,18 +161,34 @@ app.get('/resetpass', async (req, res) => {
 
 app.post('/verifypass', async (req, res) => {
 	try {
-		const newpassword = req.body.newpassword;
-		const query =	'UPDATE users SET password = $1 WHERE username = $2';
-		if (!isValidPass(newpassword)) throw new Error('invalid pass');
+		const new_password = req.body.new_password;
+		const query = 'UPDATE users SET password = $1 WHERE username = $2';
+		if (!isValidPass(new_password)) throw new Error('invalid pass');
 		const token = req.query.token;
 		if (typeof token != 'string') throw new Error('something went wrong');
 		const hash = await argon2.hash(token);
-		const userid = await redisClient.get(hash);
-		if(!userid)throw new Error('token expired');
-		const hashpass=await argon2.hash(newpassword);
-		const values= [hashpass,userid];
-		await client.query(query,values);
-		res.status(200).json({ message: 'pass reset success' });
+		const username = await redis.get(hash);
+		if (!username) throw new Error('token expired');
+		let stream = redis.scanStream({
+			match: `scss:${username}:*`,
+		});
+		stream.on('data', function (keys) {
+			if (keys.length) {
+				redis.unlink(keys); // logout all user sessions
+			}
+		});
+		stream.on('end', function () {
+			console.log('done');
+		});
+		const hashpass = await argon2.hash(new_password);
+		const values = [hashpass, username];
+		await client.query(query, values);
+		redis.del(hash); // finally delete token
+		req.sessionID = 'sess:' + username + ':' + v4();
+		req.session.username = username;
+		res
+			.status(200)
+			.json({ message: 'pass reset success'})
 	} catch (err) {
 		res.status(400).json({ message: err.message });
 	}

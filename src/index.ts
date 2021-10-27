@@ -72,11 +72,10 @@ app.get('/', (req, res) => {
 app.post('/login', async (req, res) => {
 	try {
 		const username = req.body.username;
-		const query = 'SELECT * FROM user WHERE username = $1';
+		const query = 'SELECT * FROM users WHERE username = $1;';
 		const values = [username];
 		const user_rows = await client.query(query, values);
 		const user = user_rows.rows[0];
-		console.log(user);
 		if (await argon2.verify(user.password, req.body.password)) {
 			// password match
 			req.sessionID = 'sess:' + username + ':' + v4();
@@ -101,7 +100,7 @@ app.post('/signup', async (req, res) => {
 		if (!isValidPass(req.body.password)) throw new Error('invalid pass');
 		const hash = await argon2.hash(req.body.password);
 		const query =
-			'INSERT INTO users(username, email,password) VALUES($1, $2,$3) RETURNING userid';
+			'INSERT INTO users(username, email,password) VALUES($1, $2,$3) RETURNING userid;';
 		const values = [req.body.username, req.body.email, hash];
 		msg_signup.to = req.body.email;
 		sgMail.send(msg_signup);
@@ -134,7 +133,7 @@ app.get('/logout', (req, res) => {
 	}
 });
 
-app.get('/resetpass', async (req, res) => {
+app.post('/resetpass', async (req, res) => {
 	try {
 		msg_reset.to = req.body.email;
 		const query = 'SELECT userid,username FROM users WHERE email=$1';
@@ -159,7 +158,7 @@ app.get('/resetpass', async (req, res) => {
 	}
 });
 
-app.post('/verifypass', async (req, res) => {
+app.get('/verifypass', async (req, res) => {
 	try {
 		const new_password = req.body.new_password;
 		const query = 'UPDATE users SET password = $1 WHERE username = $2';
@@ -193,6 +192,7 @@ app.post('/verifypass', async (req, res) => {
 		res.status(400).json({ message: err.message });
 	}
 });
+
 const isValidPass = (pass: string) => {
 	if (pass.length > 4) return true;
 	return false;

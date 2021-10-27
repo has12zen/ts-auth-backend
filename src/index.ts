@@ -66,7 +66,7 @@ app.listen(PORT, () => {
 // routes
 app.get('/', (req, res) => {
 	if (req.session.username) res.send('you are logged in');
-	else res.send('Please log in');
+	else res.send('Please log in and this api is json only so use postman');
 });
 
 app.post('/login', async (req, res) => {
